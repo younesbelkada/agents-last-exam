@@ -24,6 +24,8 @@
 #   --wall-time S        per-task agent cap in seconds (default: 1800)
 #   --concurrency N      sandbox jobs in flight (default: 4)
 #   --flavor F           sandbox hardware, `hf jobs hardware` (default: cpu-upgrade)
+#   --start-timeout S    seconds to wait for a sandbox to boot, image pull
+#                        included (default: 3600)
 #   --data-bucket URI    hf://buckets/<ns>/<bucket> holding the task data; omit
 #                        only for a demo/ smoke run (baked_in_sandbox)
 #   --results-bucket URI hf://buckets/<ns>/<bucket> to sync .logs/ale into
@@ -45,6 +47,7 @@ FROM="selected_tasks/docker_support.txt"
 WALL_TIME=1800
 CONCURRENCY=4
 FLAVOR="cpu-upgrade"
+START_TIMEOUT=3600
 DATA_BUCKET="${ALE_DATA_BUCKET:-}"
 RESULTS_BUCKET="${ALE_RESULTS_BUCKET:-}"
 NAMESPACE=""
@@ -65,6 +68,7 @@ while (( $# )); do
     --wall-time)      WALL_TIME="$2"; shift 2 ;;
     --concurrency)    CONCURRENCY="$2"; shift 2 ;;
     --flavor)         FLAVOR="$2"; shift 2 ;;
+    --start-timeout)  START_TIMEOUT="$2"; shift 2 ;;
     --data-bucket)    DATA_BUCKET="$2"; shift 2 ;;
     --results-bucket) RESULTS_BUCKET="$2"; shift 2 ;;
     --namespace)      NAMESPACE="$2"; shift 2 ;;
@@ -168,7 +172,9 @@ fi
   echo "flavor: ${FLAVOR}"
   echo "transport: job"
   echo "job_timeout: 24h"
-  echo "start_timeout: 1800"
+  # A cold pull of the ~40 GB sandbox image has been measured at ~28 min, so
+  # the provider default of 1800 can expire while the pull is still running.
+  echo "start_timeout: ${START_TIMEOUT}"
   if [[ -n "$NAMESPACE" ]]; then echo "namespace: ${NAMESPACE}"; fi
   if [[ -n "$DATA_BUCKET" ]]; then
     echo "volumes:"
@@ -201,6 +207,7 @@ echo ">> harness:     ${HARNESS}$([[ -n "$MODEL" ]] && echo " (model ${MODEL})")
 echo ">> tasks:       $(wc -l < "$RUN_DIR/tasks.txt" | tr -d ' ') selected"
 sed 's/^/                 /' "$RUN_DIR/tasks.txt"
 echo ">> sandboxes:   ${FLAVOR}, ${CONCURRENCY} in flight, ${WALL_TIME}s per task"
+echo ">> boot budget: ${START_TIMEOUT}s per sandbox (cold image pull runs ~30 min)"
 echo ">> task data:   ${DATA_BUCKET:-baked_in_sandbox (demo/ tasks only — real tasks need --data-bucket)}"
 echo ">> configs:     ${RUN_DIR}/"
 
@@ -210,6 +217,7 @@ if (( SUBMIT )); then
     --harness "$HARNESS"
     --tasks "$(paste -sd, "$RUN_DIR/tasks.txt")"
     --wall-time "$WALL_TIME" --concurrency "$CONCURRENCY" --flavor "$FLAVOR"
+    --start-timeout "$START_TIMEOUT"
   )
   [[ -n "$DATA_BUCKET" ]] && remote_flags+=(--data-bucket "$DATA_BUCKET")
   [[ -n "$MODEL" ]] && remote_flags+=(--model "$MODEL")
