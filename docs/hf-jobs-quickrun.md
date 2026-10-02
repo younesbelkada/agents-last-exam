@@ -8,8 +8,19 @@ full benchmark number.
 Everything is driven by one script:
 
 ```bash
-scripts/hf_quickrun.sh --help
+scripts/hf_quickrun.py --help
 ```
+
+There are three scripts in total, and each shell script has a Python port that
+takes the same flags. The ports are the ones that get new features (a model
+matrix, percentage subsets, the score report); the shell versions stay for
+single-model runs.
+
+| Script | Shell equivalent | Purpose |
+|---|---|---|
+| `scripts/hf_quickrun.py` | `hf_quickrun.sh` | Run a subset against one or more models |
+| `scripts/fetch_task_subset.py` | `fetch_task_subset.sh` | Stage a few tasks' data into a bucket |
+| `scripts/model_size_sweep.py` | (none) | A controlled model-size comparison |
 
 ## Topology
 
@@ -44,6 +55,36 @@ job.
    hf buckets sync task-data hf://buckets/<namespace>/ale-task-data
    ```
 
+   For subset runs, skip the 48 GB archive and fetch only the tasks you need.
+   `scripts/fetch_task_subset.py` pulls `input/` + `software/` from the open
+   dataset and `reference/` from the gated one, merges them, restores the
+   native filenames and symlinks, and syncs the result:
+
+   ```bash
+   scripts/fetch_task_subset.py \
+     --tasks .logs/quickrun/<run-name>/tasks.txt \
+     --bucket hf://buckets/<namespace>/ale-task-data
+   ```
+
+   Reference access is what makes a run scoreable. Without it, pass
+   `--no-reference` and expect every reference-based grader to score 0.
+
+   The bucket root must hold the domain directories themselves, because
+   staging copies from `<mount>/<domain>/<task>/<variant>/input`:
+
+   ```bash
+   hf buckets ls <namespace>/ale-task-data
+   # business_finance/  computing_math/  education_info/ ...
+   ```
+
+   If the root instead holds a single wrapper directory (the archive extracted
+   one level deeper), you do not need to re-upload. Point at the subdirectory,
+   since the volume grammar accepts a prefix:
+
+   ```bash
+   --data-bucket hf://buckets/<namespace>/ale-task-data/<subdir>
+   ```
+
 3. A bucket for results. `hf buckets create` makes a **public** bucket unless
    you pass `--private`, and run logs contain full agent trajectories and task
    output, so keep it private:
@@ -63,22 +104,41 @@ job.
    export ALE_RESULTS_BUCKET=hf://buckets/<namespace>/ale-results
    ```
 
-5. Local runs need the repo installed (`uv sync --all-packages`) and
-   `secret/.env` to carry `HF_TOKEN=...`. The `--submit` path does both inside
-   the job.
+5. Local runs need the repo installed (`uv sync --all-packages`).
+
+## Credentials
+
+`hf auth login` is enough. The token reaches three places:
+
+- **Creating sandbox jobs.** The provider calls `get_token()`, which reads
+  `HF_TOKEN` or the stored login.
+- **The agent's model calls.** The HF-router presets set
+  `api_key: ${env:HF_TOKEN}`, and that substitution resolves only from the
+  process environment, not from the stored login. The script bridges the gap by
+  exporting `hf auth token` when `HF_TOKEN` is unset, and refuses to start if
+  neither is available.
+- **A `--submit` job.** Passed as `hf jobs run --secrets HF_TOKEN`, whose value
+  is read from your environment (extended with the stored login), never from
+  the command line. The job writes it to `secret/.env` on the clone.
+
+To use an explicit token instead, either `export HF_TOKEN=hf_...` or put
+`HF_TOKEN=hf_...` in `secret/.env`. Note that `secret/.env` is loaded with
+override, so a blank `HF_TOKEN=` line there silently beats your shell export.
+The script stops with an error rather than letting the agent run with an empty
+key.
 
 ## Run it
 
 Smoke test first, one demo task, no task data needed:
 
 ```bash
-scripts/hf_quickrun.sh --tasks demo/hello
+scripts/hf_quickrun.py --tasks demo/hello
 ```
 
 Then a real subset, six tasks spread across six domains:
 
 ```bash
-scripts/hf_quickrun.sh \
+scripts/hf_quickrun.py \
   --harness qwen_code_hf --model Qwen/Qwen3.5-9B \
   --tasks 6 --wall-time 1800 --concurrency 6
 ```
@@ -86,7 +146,7 @@ scripts/hf_quickrun.sh \
 Same thing with nothing running locally:
 
 ```bash
-scripts/hf_quickrun.sh --harness qwen_code_hf --model Qwen/Qwen3.5-9B \
+scripts/hf_quickrun.py --harness qwen_code_hf --model Qwen/Qwen3.5-9B \
   --tasks 6 --submit
 ```
 
@@ -113,16 +173,80 @@ with `ANTHROPIC_API_KEY`).
 
 ## Choosing the subset
 
-`--tasks` takes three forms:
+`--tasks` takes four forms:
 
 - a number: sample that many tasks from the pool, interleaved by domain, so
   `--tasks 6` gives six different domains rather than six finance tasks;
+- a percentage of the pool: `--tasks 10%` is 10 of the 99 Linux tasks, rounded
+  up (Python scripts only);
 - a `.txt` path: any list under `selected_tasks/`, or your own;
 - a comma-separated list: `--tasks demo/hello,legal/legal_dr_fees_01`.
 
-`--from` sets the pool for the numeric form. It defaults to
+`--from` sets the pool for the numeric and percentage forms. It defaults to
 `selected_tasks/docker_support.txt` (99 Linux tasks), which is the right pool
 for this provider.
+
+Selection is deterministic, not random: the pool is interleaved by domain and
+the first N are taken. The same `--tasks` value against the same pool always
+picks the same tasks, which is what lets two runs be compared.
+
+## Comparing models
+
+Pass `--model` more than once and the run becomes a model matrix: every model
+runs the same tasks inside one experiment, with one orchestrator, one task
+selection and one results sync.
+
+```bash
+scripts/hf_quickrun.py --harness qwen_code_hf \
+  --model Qwen/Qwen3-8B --model Qwen/Qwen3-32B --tasks 6
+```
+
+`scripts/model_size_sweep.py` is that, preconfigured for a size ladder. It
+holds everything but `model:` fixed, records the resolved plan under
+`.logs/sweep/<run-name>/`, and can stage the subset's task data first:
+
+```bash
+scripts/model_size_sweep.py \
+  --fetch-data \
+  --data-bucket hf://buckets/<ns>/ale-task-data \
+  --results-bucket hf://buckets/<ns>/ale-results-qwen \
+  --namespace <ns> --submit \
+  --repo https://github.com/<you>/agents-last-exam --ref <branch>
+```
+
+The default ladder is the dense Qwen3 sizes (4B, 8B, 14B, 32B) plus
+Qwen3.8-27B, all served by the HF Inference Providers router. Override it with
+repeated `--model` flags. The default subset is `10%`, so the default sweep is
+5 models times 10 tasks, or 50 sandbox jobs.
+
+Results land in `.logs/ale/<run-name>/<harness>/<model-slug>/<task>/v0/<ts>/`.
+Because `auto_resume` is scoped to that output root, re-invoking with the same
+`--run-name` re-runs only the cells that have no completed run; without
+`--run-name` each invocation starts a fresh timestamped root.
+
+A local run prints a task by model score matrix when it ends (`--no-report`
+suppresses it). After a `--submit` run, pull the logs and render the same table
+from them:
+
+```bash
+hf buckets sync hf://buckets/<ns>/ale-results-qwen .logs/ale
+scripts/model_size_sweep.py --report-only .logs/ale/<run-name>
+```
+
+```
+task                                           Qwen3-4B-Instruct-2507  Qwen3-8B  Qwen3-14B  Qwen3-32B
+business_finance/american_option_pricing_ls                      0.00      0.25       0.50       1.00
+computing_math/branch_bound_atsp                                    F      0.00       0.50       0.75
+-----------------------------------------------------------------------------------------------------
+mean (scored)                                                    0.00      0.12       0.50       0.88
+scored / total                                                    1/2       2/2        2/2        2/2
+```
+
+Two caveats when reading the result. A small model that scores 0 everywhere
+may be failing to use the absolute input paths rather than failing the task
+(see the `--prompt-suffix` note below), and the sweep's default suffix exists
+for exactly that reason. And a model that is not served by the router fails
+every unit at the first API call, which shows up as `F` across its column.
 
 ## What makes a run fast
 
@@ -132,12 +256,61 @@ for this provider.
 | `--wall-time S` | Caps the agent per task. Task cards allow 7200s; 1800s is usually enough to see whether a harness works at all, and anything stopped at the cap is recorded as `timeout`. |
 | `--concurrency N` | Sandbox jobs in flight, so wall-clock is roughly `ceil(N_tasks / concurrency)` task slots. Each job is a separate `--flavor` machine. |
 | `--flavor` | Sandbox hardware. Default `cpu-upgrade` (8 vCPU / 32 GB). See `hf jobs hardware`. |
+| `--start-timeout S` | How long a sandbox may take to boot, image pull included. Default 3600. Does not speed anything up, but too low a value burns the whole run on pull timeouts. |
 
 The script fixes `max_attempts: 1` (failures are reported, not retried) and
 `cleanup_mode: delete` (jobs are cancelled as soon as a unit finishes).
 
-Unavoidable overhead: a cold pull of the ~40 GB sandbox image takes 10 to 15
-minutes per job, before the agent starts. Short runs are dominated by it.
+Unavoidable overhead: every sandbox job pulls the ~40 GB image before the agent
+starts. The shipped config estimates 10 to 15 minutes, but a measured run with
+4 units in flight took about 28 minutes, so `--start-timeout` defaults to 3600s
+here rather than the provider's 1800s. A unit whose sandbox does not come up in
+that window fails with:
+
+```
+RuntimeError: hfsandbox: job <id> not RUNNING after <n>s
+  (image pull of agentslastexam/ale-ubuntu22-docker:latest still in progress?)
+```
+
+If you hit that, raise `--start-timeout` and lower `--concurrency`: each unit
+is a separate node doing its own cold pull, so more units in flight means more
+simultaneous pulls, not a shared one.
+
+A different failure looks similar in the sandbox log but is not a timeout. If
+the pod boots, serves one `GET /status` and one `POST /cmd`, then shuts down a
+few seconds later, the sandbox was fine and staging failed on the first call it
+makes:
+
+```
+RuntimeError: task_data_source=mounted: expected input/ at
+  '/mnt/ale-task-data/<domain>/<task>/<variant>' inside the sandbox, not found.
+  Is the task-data volume mounted at '/mnt/ale-task-data'?
+```
+
+The unit then fails and the cleanup cancels the job, which is the shutdown you
+see. Check the bucket layout as described in the setup section. The script
+preflights it before launching anything.
+
+A third case looks like missing data but is not. If the run reaches the agent
+and the trajectory fills with `File not found`, staging already succeeded (it
+would have failed the unit otherwise). Inputs live at an absolute path built
+from the image's `task_data_root`:
+
+```
+/media/user/data/agenthle/<domain>/<task>/<variant>/input/...
+```
+
+If the agent is reading under its own work dir (`/home/user/.ale/<agent>/<run_id>/`)
+instead, it is resolving relative paths against its cwd rather than using the
+task directory it was given. Confirm with:
+
+```bash
+grep -o '/media/user/data/agenthle[^"]*' trajectory.json | head -3
+```
+
+If the instruction carries that path, the agent ignored it. Smaller models do
+this often. Try a larger model, or ground it with `--prompt-suffix`, which is
+appended verbatim to every task prompt.
 
 ## Results
 
