@@ -51,6 +51,14 @@ _HOP_BY_HOP = frozenset({
     "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
 })
 
+_LABEL_UNSAFE = re.compile(r"[^a-zA-Z0-9._-]")
+
+
+def _job_label(value: str) -> str:
+    """HF job label values must match ``^[a-zA-Z0-9._-]*$``; task ids and model
+    ids both contain ``/``."""
+    return _LABEL_UNSAFE.sub("_", value)[:60]
+
 
 # ======================================================================
 # Config
@@ -444,9 +452,12 @@ class HfSandboxProvider(Provider):
         token = get_token()
         if not token:
             raise RuntimeError("hfsandbox: no HF token (set HF_TOKEN or `hf auth login`)")
-        # HF job label values must match ^[a-zA-Z0-9._-]*$ (task ids contain "/").
-        safe_task = re.sub(r"[^a-zA-Z0-9._-]", "_", spec.task_id or "")[:60]
-        labels = {"ale": "sandbox", "ale_task": safe_task}
+        labels = {
+            "ale": "sandbox",
+            "ale_task": _job_label(spec.task_id or ""),
+            "ale_model": _job_label(spec.model_tag or ""),
+            "ale_harness": _job_label(spec.harness or ""),
+        }
         job = await asyncio.to_thread(
             api.run_job,
             image=container_ref,
