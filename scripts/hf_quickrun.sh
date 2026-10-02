@@ -203,6 +203,28 @@ max_attempts: 1
 cleanup_mode: delete
 YAML
 
+# Staging copies from <mount>/<domain>/<task>/<variant>/input, so the bucket
+# root must hold domain dirs. A tarball that extracted into a wrapper dir is
+# the usual reason it does not, and the sandbox only finds out after booting.
+if [[ -n "$DATA_BUCKET" ]]; then
+  listing="$("${HF[@]}" buckets ls "${DATA_BUCKET#hf://buckets/}" 2>/dev/null || true)"
+  if [[ -n "$listing" ]]; then
+    missing=()
+    while read -r domain; do
+      grep -qE "(^|[[:space:]/])${domain}(/|[[:space:]]|$)" <<<"$listing" || missing+=("$domain")
+    done < <(cut -d/ -f1 "$RUN_DIR/tasks.txt" | sort -u)
+    if (( ${#missing[@]} )); then
+      echo "ERROR: ${DATA_BUCKET} has no ${missing[*]} directory at its root." >&2
+      echo "       Staging reads <bucket>/<domain>/<task>/<variant>/input. Root currently holds:" >&2
+      echo "$listing" | head -10 | sed 's/^/         /' >&2
+      die "point --data-bucket at the subdirectory holding the domain dirs, e.g.
+       --data-bucket ${DATA_BUCKET}/<subdir>"
+    fi
+  else
+    echo ">> WARNING: could not list ${DATA_BUCKET}; skipping the layout check" >&2
+  fi
+fi
+
 echo ">> harness:     ${HARNESS}$([[ -n "$MODEL" ]] && echo " (model ${MODEL})")"
 echo ">> tasks:       $(wc -l < "$RUN_DIR/tasks.txt" | tr -d ' ') selected"
 sed 's/^/                 /' "$RUN_DIR/tasks.txt"
