@@ -1,0 +1,19 @@
+# pi_cli — earendil-works/pi, routed through the Hugging Face Inference
+# Providers router.
+#
+# provider: custom is the mode that takes an arbitrary OpenAI-compatible
+# base_url. openrouter and direct both resolve the model against pi's own
+# built-in catalog, which will not carry a model the HF router has just
+# added, and direct would additionally read `Qwen/...` as a vendor prefix.
+#
+# custom mode is also the only one where `max_tokens` applies: pi's
+# models.json schema defaults it to 16384, which truncates reasoning-heavy
+# models mid-answer. The dataclass default of 65536 is left in place.
+# Reference as:  agents: [ configs/agents/pi_cli_hf.yaml ]
+
+harness: pi_cli
+model: Qwen/Qwen3.5-9B
+config:
+  provider: custom
+  base_url: https://router.huggingface.co/v1
+  api_key: ${env:HF_TOKEN}

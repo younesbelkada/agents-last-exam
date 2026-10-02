@@ -11,7 +11,7 @@ Everything is driven by one script:
 scripts/hf_quickrun.py --help
 ```
 
-There are three scripts in total, and each shell script has a Python port that
+There are four scripts in total, and each shell script has a Python port that
 takes the same flags. The ports are the ones that get new features (a model
 matrix, percentage subsets, the score report); the shell versions stay for
 single-model runs.
@@ -21,6 +21,7 @@ single-model runs.
 | `scripts/hf_quickrun.py` | `hf_quickrun.sh` | Run a subset against one or more models |
 | `scripts/fetch_task_subset.py` | `fetch_task_subset.sh` | Stage a few tasks' data into a bucket |
 | `scripts/model_size_sweep.py` | (none) | A controlled model-size comparison |
+| `scripts/serve_model_job.py` | (none) | Serve a model the router does not offer |
 
 ## Topology
 
@@ -247,6 +248,119 @@ may be failing to use the absolute input paths rather than failing the task
 (see the `--prompt-suffix` note below), and the sweep's default suffix exists
 for exactly that reason. And a model that is not served by the router fails
 every unit at the first API call, which shows up as `F` across its column.
+
+Before committing to a ladder, check that the router actually serves each
+model. The catalog is the authority, not the Hub:
+
+```bash
+curl -s https://router.huggingface.co/v1/models \
+  -H "Authorization: Bearer $(hf auth token)" | jq -r '.data[].id' | grep Qwen
+```
+
+A model repo can exist on the Hub with no provider serving it. For those, see
+the next section.
+
+## Serving a model yourself
+
+`scripts/serve_model_job.py` runs vLLM on a GPU Job and exposes its port
+through the HF Jobs proxy, so a model no Inference Provider offers still gets
+an OpenAI-compatible endpoint at `https://<job-id>--8000.hf.jobs/v1`. Access
+needs `Authorization: Bearer <HF token>`, which is exactly the bearer the
+presets already send as `api_key`, so a generated preset needs no other change
+and works both locally and from inside a task sandbox.
+
+```bash
+scripts/serve_model_job.py --model Qwen/Qwen3.5-4B
+```
+
+It picks the cheapest GPU flavor that fits the bf16 weights (override with
+`--flavor`), waits for vLLM to answer `/health`, writes
+`configs/agents/<from-preset>_served_<model-slug>.yaml`, and cancels the job on
+Ctrl-C. The harness is in the filename, and so in the agent `id`, so two
+harnesses serving the same model keep separate output branches. T4
+flavors are never auto-selected: compute capability 7.5 has no bf16 and vLLM
+refuses the checkpoint rather than downcasting.
+
+The default image is `vllm/vllm-openai:nightly`, not `:latest`. A model the
+router does not serve is usually one whose architecture landed after the last
+stable vLLM, so stable would fail to load it. Pin `:latest` with `--image` when
+you know the architecture is supported.
+
+`--tool-call-parser` is model-specific and worth checking against the model
+card: Qwen3.5 asks for `qwen3_coder`, other families differ.
+
+`--max-model-len` defaults to 0, meaning the model's own maximum. Resist
+lowering it to save memory. A context shorter than what the harness sends makes
+vLLM reject every call with `400 Bad Request`, which surfaces in the server log
+as nothing but a status line while the whole run fails; a KV cache that does
+not fit, by contrast, fails loudly at startup. Hybrid-attention models are
+cheaper than they look here: Qwen3.5-2B runs full attention on only 6 of 24
+layers with 2 KV heads, so its full 262144-token context costs about 3.2 GB per
+sequence.
+
+Arguments forwarded with `--vllm-arg` need the `=` form, since argparse would
+otherwise read a leading dash as the next flag:
+
+```bash
+--vllm-arg=--language-model-only    # skip the vision tower, more KV cache
+```
+
+The preset carries its own `id:`, so a self-hosted run never lands in the same
+output branch as the same model served by the router.
+
+To use one in a sweep, start it detached, run against the preset it wrote, then
+stop it. One vLLM job serves one model, so self-hosted models are swept one at
+a time; a shared `--run-name` merges them into a single output root and a
+single report, because `auto_resume` skips the cells already done:
+
+```bash
+scripts/serve_model_job.py --model Qwen/Qwen3.5-2B --detach
+scripts/model_size_sweep.py --run-name qwen-ladder \
+  --harness served_qwen-qwen3-5-2b --model Qwen/Qwen3.5-2B --no-report ...
+scripts/serve_model_job.py --stop <job-id>
+
+# repeat per served model, then render the combined matrix
+scripts/model_size_sweep.py --report-only .logs/ale/qwen-ladder
+```
+
+### Walking away from a run
+
+Jobs are server-side. Closing your laptop never cancels one, which is the
+answer you want for `--submit` and the answer you do not want otherwise.
+
+With `--submit`, everything runs on HF: the orchestrator job, the sandboxes it
+creates and the final bucket sync. Add `--detach` so the launching command
+returns once the job exists instead of blocking on its log stream; without it
+you only lose the stream, not the run. Reattach with `hf jobs logs -f <id>`.
+
+Without `--submit`, the orchestrator is the process on your laptop, and it is
+the only thing that cancels a sandbox when its unit finishes. If it is
+suspended or killed, every sandbox it started keeps running and billing until
+`--job-timeout` expires, with nothing driving them. Self-hosted models force
+this mode, because the generated preset holds a `base_url` that only exists
+after the server job starts. So either keep the machine awake:
+
+```bash
+caffeinate -is ./scripts/model_size_sweep.py ...
+```
+
+or lower the ceiling on what an orphan can cost, with `--job-timeout 4h`
+instead of the 24h default.
+
+To sweep up strays, both scripts label their jobs:
+
+```bash
+hf jobs ps --label ale=sandbox -q      | xargs -I{} hf jobs cancel {}
+hf jobs ps --label ale=model-server -q | xargs -I{} hf jobs cancel {}
+```
+
+Two more things to weigh. A served model is billed for the entire
+job lifetime, including the image pull and the weight download, so a detached
+job with no later `--stop` keeps charging until `--timeout` expires. And a
+ladder that mixes self-hosted vLLM with router-served models is no longer a
+clean size comparison: sampling defaults, quantization, context length and
+tool-parser behaviour all differ between your vLLM and whatever the provider
+runs. Self-host every rung, or none.
 
 ## What makes a run fast
 

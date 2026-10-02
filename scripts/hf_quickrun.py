@@ -77,11 +77,13 @@ class Settings:
     concurrency: int = 4
     flavor: str = "cpu-upgrade"
     start_timeout: int = 3600
+    job_timeout: str = SANDBOX_JOB_TIMEOUT
     prompt_suffix: str = ""
     data_bucket: str = field(default_factory=lambda: os.environ.get("ALE_DATA_BUCKET", ""))
     results_bucket: str = field(default_factory=lambda: os.environ.get("ALE_RESULTS_BUCKET", ""))
     namespace: str = ""
     submit: bool = False
+    detach: bool = False
     git_repo: str = UPSTREAM_REPO
     git_ref: str = "main"
     dry_run: bool = False
@@ -125,8 +127,15 @@ def parse_args(argv: list[str] | None = None) -> Settings:
                              "Default: $ALE_RESULTS_BUCKET")
     parser.add_argument("--namespace", default="", metavar="NS",
                         help="bill jobs to an org instead of the token owner")
+    parser.add_argument("--job-timeout", default=SANDBOX_JOB_TIMEOUT, metavar="D",
+                        help="hard cap on each sandbox job. This is what bounds the bill "
+                             "if the orchestrator dies without cancelling its sandboxes "
+                             "(default: %(default)s)")
     parser.add_argument("--submit", action="store_true",
                         help="run the orchestrator itself as an HF Job")
+    parser.add_argument("--detach", action="store_true",
+                        help="with --submit, return as soon as the orchestrator job is "
+                             "created instead of streaming its logs")
     parser.add_argument("--repo", dest="git_repo", default=UPSTREAM_REPO, metavar="URL",
                         help="clone source used by --submit (default: upstream)")
     parser.add_argument("--ref", dest="git_ref", default="main", metavar="REF",
@@ -152,11 +161,13 @@ def parse_args(argv: list[str] | None = None) -> Settings:
         concurrency=args.concurrency,
         flavor=args.flavor,
         start_timeout=args.start_timeout,
+        job_timeout=args.job_timeout,
         prompt_suffix=args.prompt_suffix,
         data_bucket=args.data_bucket,
         results_bucket=args.results_bucket,
         namespace=args.namespace,
         submit=args.submit,
+        detach=args.detach,
         git_repo=args.git_repo,
         git_ref=args.git_ref,
         dry_run=args.dry_run,
@@ -199,7 +210,7 @@ def write_environment_config(settings: Settings, run_dir: Path) -> Path:
         "image": SANDBOX_IMAGE,
         "flavor": settings.flavor,
         "transport": "job",
-        "job_timeout": SANDBOX_JOB_TIMEOUT,
+        "job_timeout": settings.job_timeout,
         # A cold pull of the ~40 GB sandbox image has been measured at ~28 min, so
         # the provider default of 1800 can expire while the pull is still running.
         "start_timeout": settings.start_timeout,
@@ -292,6 +303,7 @@ def submit_orchestrator(settings: Settings, tasks: list[str]) -> int:
         "--concurrency", str(settings.concurrency),
         "--flavor", settings.flavor,
         "--start-timeout", str(settings.start_timeout),
+        "--job-timeout", settings.job_timeout,
     ]
     for model in settings.models:
         flags += ["--model", model]
@@ -324,6 +336,10 @@ exec uv run python scripts/hf_quickrun.py {shlex.join(flags)}"""
 
     argv = ["hf", "jobs", "run", "--flavor", "cpu-basic", "--timeout", ORCHESTRATOR_TIMEOUT,
             "--secrets", "HF_TOKEN"]
+    # Without --detach the CLI blocks streaming the job's logs. The job is created
+    # before that starts, so losing the stream never stops the run.
+    if settings.detach:
+        argv.append("--detach")
     if os.environ.get("OPENAI_API_KEY"):
         argv += ["--secrets", "OPENAI_API_KEY"]
     if settings.namespace:
