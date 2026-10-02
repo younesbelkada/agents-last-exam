@@ -26,6 +26,8 @@
 #   --flavor F           sandbox hardware, `hf jobs hardware` (default: cpu-upgrade)
 #   --start-timeout S    seconds to wait for a sandbox to boot, image pull
 #                        included (default: 3600)
+#   --prompt-suffix TXT  appended to every task prompt; use it to ground an
+#                        agent that invents paths instead of using the given one
 #   --data-bucket URI    hf://buckets/<ns>/<bucket> holding the task data; omit
 #                        only for a demo/ smoke run (baked_in_sandbox)
 #   --results-bucket URI hf://buckets/<ns>/<bucket> to sync .logs/ale into
@@ -57,6 +59,7 @@ WALL_TIME=1800
 CONCURRENCY=4
 FLAVOR="cpu-upgrade"
 START_TIMEOUT=3600
+PROMPT_SUFFIX=""
 DATA_BUCKET="${ALE_DATA_BUCKET:-}"
 RESULTS_BUCKET="${ALE_RESULTS_BUCKET:-}"
 NAMESPACE=""
@@ -78,6 +81,7 @@ while (( $# )); do
     --concurrency)    CONCURRENCY="$2"; shift 2 ;;
     --flavor)         FLAVOR="$2"; shift 2 ;;
     --start-timeout)  START_TIMEOUT="$2"; shift 2 ;;
+    --prompt-suffix)  PROMPT_SUFFIX="$2"; shift 2 ;;
     --data-bucket)    DATA_BUCKET="$2"; shift 2 ;;
     --results-bucket) RESULTS_BUCKET="$2"; shift 2 ;;
     --namespace)      NAMESPACE="$2"; shift 2 ;;
@@ -212,6 +216,13 @@ max_attempts: 1
 cleanup_mode: delete
 YAML
 
+if [[ -n "$PROMPT_SUFFIX" ]]; then
+  {
+    echo "prompt_suffix: |"
+    sed 's/^/  /' <<<"$PROMPT_SUFFIX"
+  } >> "$RUN_DIR/experiment.yaml"
+fi
+
 # Staging copies from <mount>/<domain>/<task>/<variant>/input, so the bucket
 # root must hold domain dirs. A tarball that extracted into a wrapper dir is
 # the usual reason it does not, and the sandbox only finds out after booting.
@@ -256,6 +267,7 @@ if (( SUBMIT )); then
     --start-timeout "$START_TIMEOUT"
   )
   [[ -n "$DATA_BUCKET" ]] && remote_flags+=(--data-bucket "$DATA_BUCKET")
+  [[ -n "$PROMPT_SUFFIX" ]] && remote_flags+=(--prompt-suffix "$PROMPT_SUFFIX")
   [[ -n "$MODEL" ]] && remote_flags+=(--model "$MODEL")
   [[ -n "$RESULTS_BUCKET" ]] && remote_flags+=(--results-bucket "$RESULTS_BUCKET")
   [[ -n "$NAMESPACE" ]] && remote_flags+=(--namespace "$NAMESPACE")
