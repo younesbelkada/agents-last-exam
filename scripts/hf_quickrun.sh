@@ -35,6 +35,15 @@
 #   --dry-run            print the plan (run matrix, or the job command) and stop
 #
 # ALE_DATA_BUCKET / ALE_RESULTS_BUCKET supply the bucket defaults.
+
+# This script needs real bash (arrays, [[ ]]). `sh script.sh` on macOS runs
+# bash in POSIX mode, which parses some of it differently, so re-exec. The
+# unset is what stops the exported POSIXLY_CORRECT from looping us back here.
+if [ -z "${BASH_VERSION:-}" ] || [ -n "${POSIXLY_CORRECT:-}" ]; then
+  unset POSIXLY_CORRECT
+  exec bash "$0" "$@"
+fi
+
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -206,19 +215,24 @@ YAML
 # Staging copies from <mount>/<domain>/<task>/<variant>/input, so the bucket
 # root must hold domain dirs. A tarball that extracted into a wrapper dir is
 # the usual reason it does not, and the sandbox only finds out after booting.
-if [[ -n "$DATA_BUCKET" ]]; then
+if [[ "$DATA_BUCKET" == hf://datasets/* ]]; then
+  echo ">> NOTE: mounting a dataset repo directly. The open input dataset ships" >&2
+  echo ">>       input/ and software/ but no reference/, so tasks will run and" >&2
+  echo ">>       then fail to score. Use it to smoke-test a harness, not to rank." >&2
+elif [[ -n "$DATA_BUCKET" ]]; then
   listing="$("${HF[@]}" buckets ls "${DATA_BUCKET#hf://buckets/}" 2>/dev/null || true)"
   if [[ -n "$listing" ]]; then
     missing=()
-    while read -r domain; do
+    for domain in $(cut -d/ -f1 "$RUN_DIR/tasks.txt" | sort -u); do
       grep -qE "(^|[[:space:]/])${domain}(/|[[:space:]]|$)" <<<"$listing" || missing+=("$domain")
-    done < <(cut -d/ -f1 "$RUN_DIR/tasks.txt" | sort -u)
+    done
     if (( ${#missing[@]} )); then
       echo "ERROR: ${DATA_BUCKET} has no ${missing[*]} directory at its root." >&2
       echo "       Staging reads <bucket>/<domain>/<task>/<variant>/input. Root currently holds:" >&2
       echo "$listing" | head -10 | sed 's/^/         /' >&2
-      die "point --data-bucket at the subdirectory holding the domain dirs, e.g.
-       --data-bucket ${DATA_BUCKET}/<subdir>"
+      die "--data-bucket must be the TASK-DATA bucket, not the results bucket.
+       If this is the right bucket but the archive extracted one level deeper,
+       point at that subdir: --data-bucket ${DATA_BUCKET}/<subdir>"
     fi
   else
     echo ">> WARNING: could not list ${DATA_BUCKET}; skipping the layout check" >&2
