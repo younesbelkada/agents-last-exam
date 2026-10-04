@@ -140,6 +140,16 @@ def require_linux_subset(tasks: list[str]) -> None:
 _PRIVATE_FIELD = re.compile(r'"private"\s*:\s*(true|false)')
 
 
+# The API rejects anything else, dots included: a model id like
+# `Qwen/Qwen3.5-9B` has both a slash and a dot to replace.
+_LABEL_UNSAFE = re.compile(r"[^a-zA-Z0-9_-]")
+
+
+def job_label(value: str) -> str:
+    """HF job label values must match ``^[a-zA-Z0-9_-]*$``."""
+    return _LABEL_UNSAFE.sub("_", value)[:60]
+
+
 def bucket_id(uri: str) -> str:
     """`<ns>/<bucket>` from an `hf://buckets/<ns>/<bucket>[/prefix]` URI."""
     return "/".join(uri.removeprefix("hf://buckets/").split("/")[:2])

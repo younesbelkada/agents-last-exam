@@ -51,12 +51,13 @@ _HOP_BY_HOP = frozenset({
     "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
 })
 
-_LABEL_UNSAFE = re.compile(r"[^a-zA-Z0-9._-]")
+# The API rejects anything else, dots included: a task id like
+# `legal/legal_dr_fees_01` has a slash, a model id like `Qwen/Qwen3.5-9B` both.
+_LABEL_UNSAFE = re.compile(r"[^a-zA-Z0-9_-]")
 
 
 def _job_label(value: str) -> str:
-    """HF job label values must match ``^[a-zA-Z0-9._-]*$``; task ids and model
-    ids both contain ``/``."""
+    """HF job label values must match ``^[a-zA-Z0-9_-]*$``."""
     return _LABEL_UNSAFE.sub("_", value)[:60]
 
 

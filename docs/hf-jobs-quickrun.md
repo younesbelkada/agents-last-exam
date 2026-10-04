@@ -374,18 +374,19 @@ another's.
 | Label | On | Value |
 |---|---|---|
 | `ale` | all | `orchestrator`, `sandbox` or `model-server` |
-| `ale_model` | all | the model id, e.g. `Qwen_Qwen3.5-9B` |
+| `ale_model` | all | the model id, e.g. `Qwen_Qwen3_5-9B` |
 | `ale_harness` | orchestrator, sandbox | e.g. `pi_cli` |
 | `ale_task` | sandbox | e.g. `legal_legal_dr_fees_01` |
 
-Label values must match `^[a-zA-Z0-9._-]*$`, so `/` becomes `_` and the value
+Label values must match `^[a-zA-Z0-9_-]*$`, dots included in what it rejects,
+so both the `/` and the `.` in `Qwen/Qwen3.5-9B` become `_` and the value
 is truncated at 60 characters. An orchestrator running a model matrix carries
 no `ale_model`, since one job covers several; it is named `ale-<run-name>`
 instead.
 
 ```bash
 hf jobs ps --label ale=sandbox                        # everything in flight
-hf jobs ps --label ale_model=Qwen_Qwen3.8-27B         # just the 27B rung
+hf jobs ps --label ale_model=Qwen_Qwen3_8-27B         # just the 27B rung
 hf jobs ps --label ale=sandbox --label ale_harness=pi_cli
 ```
 
