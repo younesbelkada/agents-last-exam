@@ -1,0 +1,7 @@
+harness: pi_cli
+model: Qwen/Qwen3.5-2B
+config:
+  provider: custom
+  base_url: https://6ac24d76fbc85ba68239eed2--8000.hf.jobs/v1
+  api_key: ${env:HF_TOKEN}
+id: pi_cli_hf_served_qwen-qwen3-5-2b
