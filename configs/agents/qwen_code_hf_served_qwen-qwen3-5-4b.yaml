@@ -1,6 +1,6 @@
 harness: qwen_code
 model: Qwen/Qwen3.5-4B
 config:
-  base_url: https://6ac2027e404719ba376489f9--8000.hf.jobs/v1
+  base_url: https://6ac25249fbc85ba68239f235--8000.hf.jobs/v1
   api_key: ${env:HF_TOKEN}
 id: qwen_code_hf_served_qwen-qwen3-5-4b
