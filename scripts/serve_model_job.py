@@ -21,6 +21,12 @@ it detached, run the sweep against the preset it wrote, then stop it:
     scripts/model_size_sweep.py --harness qwen_code_served --model Qwen/Qwen3.5-4B ...
     scripts/serve_model_job.py --stop <job-id>
 
+One server can back several harnesses: repeat --from-preset and each gets its
+own preset, same base_url, distinct agent id.
+
+    scripts/serve_model_job.py --model Qwen/Qwen3.5-4B --detach \\
+      --from-preset qwen_code_hf --from-preset pi_cli_hf
+
 The GPU flavor is chosen from the model's parameter count unless --flavor says
 otherwise. A served model is billed for the whole time the job runs, including
 the image pull and the weight download, so --detach without a later --stop
@@ -37,7 +43,7 @@ from pathlib import Path
 
 import requests
 import yaml
-from ale_hf_common import REPO_ROOT, ScriptError, ensure_hf_token, info, warn
+from ale_hf_common import REPO_ROOT, ScriptError, ensure_hf_token, info, job_label, warn
 from hf_quickrun import model_slug
 from huggingface_hub import HfApi
 
@@ -99,11 +105,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "model load (default: %(default)s)")
     parser.add_argument("--namespace", default="", metavar="NS",
                         help="bill the job to an org instead of the token owner")
-    parser.add_argument("--from-preset", default="qwen_code_hf", metavar="NAME",
-                        help="preset under configs/agents/ to copy harness and config "
-                             "from (default: %(default)s)")
+    parser.add_argument("--from-preset", action="append", default=[], metavar="NAME",
+                        help="preset under configs/agents/ to copy harness and config from; "
+                             "repeat to point several harnesses at the one server "
+                             "(default: qwen_code_hf)")
     parser.add_argument("--preset", default="", metavar="PATH",
-                        help="agent preset to write "
+                        help="agent preset to write; needs a single --from-preset "
                              "(default: configs/agents/<from-preset>_served_<model-slug>.yaml)")
     parser.add_argument("--no-preset", dest="write_preset", action="store_false",
                         help="do not write an agent preset")
@@ -111,7 +118,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="leave the job running and exit instead of blocking")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the job spec and stop")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    args.from_preset = args.from_preset or ["qwen_code_hf"]
+    if args.preset and len(args.from_preset) > 1:
+        parser.error("--preset names one file; pass a single --from-preset or drop it")
+    return args
 
 
 def pick_flavor(model: str, api: HfApi) -> tuple[str, float]:
@@ -193,20 +204,26 @@ def wait_until_serving(api: HfApi, job_id: str, owner: str, args: argparse.Names
     )
 
 
-def preset_path(args: argparse.Namespace) -> Path:
+def preset_path(args: argparse.Namespace, from_preset: str) -> Path:
     # The harness is part of the name, and so of the agent id: two harnesses
     # serving the same model must not share an output branch.
-    name = args.preset or f"configs/agents/{args.from_preset}_served_{model_slug(args.model)}.yaml"
+    name = args.preset or f"configs/agents/{from_preset}_served_{model_slug(args.model)}.yaml"
     target = Path(name)
     return target if target.is_absolute() else REPO_ROOT / target
 
 
-def write_preset(args: argparse.Namespace, base_url: str) -> Path:
-    """Copy a router preset, repointing it at the served model."""
-    source = REPO_ROOT / "configs" / "agents" / f"{args.from_preset}.yaml"
+def source_preset(name: str) -> Path:
+    """The configs/agents/ preset a served preset is copied from."""
+    source = REPO_ROOT / "configs" / "agents" / f"{name}.yaml"
     if not source.is_file():
         raise ScriptError(f"no preset at {source.relative_to(REPO_ROOT)}")
-    target = preset_path(args)
+    return source
+
+
+def write_preset(args: argparse.Namespace, from_preset: str, base_url: str) -> Path:
+    """Copy a router preset, repointing it at the served model."""
+    source = source_preset(from_preset)
+    target = preset_path(args, from_preset)
 
     preset = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
     preset["model"] = args.model
@@ -229,6 +246,10 @@ def serve(args: argparse.Namespace) -> int:
     api = HfApi()
     flavor, price = (args.flavor, 0.0) if args.flavor else pick_flavor(args.model, api)
     command = vllm_command(args)
+    # A misspelled --from-preset must not surface after the GPU job is already billing.
+    if args.write_preset:
+        for from_preset in args.from_preset:
+            source_preset(from_preset)
 
     if args.dry_run:
         info(f"would run {args.image} on {flavor}, exposing :{args.port}")
@@ -242,7 +263,7 @@ def serve(args: argparse.Namespace) -> int:
         flavor=flavor,
         timeout=args.timeout,
         expose=[args.port],
-        labels={"ale": "model-server"},
+        labels={"ale": "model-server", "ale_model": job_label(args.model)},
         namespace=args.namespace or None,
     )
     job_id, owner = job.id, job.owner.name
@@ -259,9 +280,10 @@ def serve(args: argparse.Namespace) -> int:
 
     info(f"serving:     {base_url}/v1")
     if args.write_preset:
-        preset = write_preset(args, base_url)
-        info(f"preset:      {preset.relative_to(REPO_ROOT)}")
-        info(f"run with:    --harness {preset.stem} --model {args.model}")
+        for from_preset in args.from_preset:
+            preset = write_preset(args, from_preset, base_url)
+            info(f"preset:      {preset.relative_to(REPO_ROOT)}")
+            info(f"run with:    --harness {preset.stem} --model {args.model}")
 
     if args.detach:
         info(f"detached. Stop it with: scripts/serve_model_job.py --stop {job_id}")

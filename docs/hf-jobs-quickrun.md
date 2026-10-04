@@ -267,6 +267,39 @@ may be failing to use the absolute input paths rather than failing the task
 for exactly that reason. And a model that is not served by the router fails
 every unit at the first API call, which shows up as `F` across its column.
 
+### Reasoning models, qwen_code, and provider-specific 400s
+
+A harness that carries assistant reasoning forward will send
+`reasoning_content` back on the second request. Not every provider accepts
+that field. Cerebras rejects it:
+
+```
+400 messages.1.assistant.reasoning_content: property
+    'messages.1.assistant.reasoning_content' is unsupported
+```
+
+`qwen_code` does carry it, so against a reasoning model it dies the moment the
+first tool call comes back, after one successful request. The agent records
+`[API Error: 400 status code (no body)]` and the unit fails in about 80
+seconds. `pi_cli` does not round-trip the field and is unaffected, which is
+what makes this look like a harness bug rather than a routing one.
+
+The router's default policy is `:fastest`, so the trap only springs when the
+fastest provider for that model happens to be a strict one. `Qwen/Qwen3.8-27B`
+is served by cerebras at 171 tok/s, roughly twice the next provider, so auto
+selects it nearly every time; `Qwen/Qwen3.5-9B` is not served by cerebras at
+all, which is why the same harness works one rung down.
+
+Pin a provider that accepts the field by suffixing the model id:
+
+```bash
+--model Qwen/Qwen3.8-27B:ovhcloud
+```
+
+The suffix flows through untouched and all the slug functions strip the colon,
+so run directories and job labels stay clean. To keep a size ladder honest,
+pin every rung to the same provider rather than only the one that broke.
+
 Before committing to a ladder, check that the router actually serves each
 model. The catalog is the authority, not the Hub:
 
@@ -298,6 +331,20 @@ Ctrl-C. The harness is in the filename, and so in the agent `id`, so two
 harnesses serving the same model keep separate output branches. T4
 flavors are never auto-selected: compute capability 7.5 has no bf16 and vLLM
 refuses the checkpoint rather than downcasting.
+
+Comparing two harnesses on one model does not need two servers. Repeat
+`--from-preset` and each one gets its own preset, pointed at the same
+`base_url` and carrying its own agent `id`:
+
+```bash
+scripts/serve_model_job.py --model Qwen/Qwen3.5-4B --detach \
+  --from-preset qwen_code_hf --from-preset pi_cli_hf
+```
+
+That writes `qwen_code_hf_served_qwen-qwen3-5-4b.yaml` and
+`pi_cli_hf_served_qwen-qwen3-5-4b.yaml`. Both harnesses then share one GPU, so
+size `--concurrency` against the server rather than per run: two sweeps at
+`--concurrency 6` put 12 agents on it, not 6.
 
 The default image is `vllm/vllm-openai:nightly`, not `:latest`. A model the
 router does not serve is usually one whose architecture landed after the last
@@ -354,9 +401,8 @@ you only lose the stream, not the run. Reattach with `hf jobs logs -f <id>`.
 Without `--submit`, the orchestrator is the process on your laptop, and it is
 the only thing that cancels a sandbox when its unit finishes. If it is
 suspended or killed, every sandbox it started keeps running and billing until
-`--job-timeout` expires, with nothing driving them. Self-hosted models force
-this mode, because the generated preset holds a `base_url` that only exists
-after the server job starts. So either keep the machine awake:
+`--job-timeout` expires, with nothing driving them. So either keep the machine
+awake:
 
 ```bash
 caffeinate -is ./scripts/model_size_sweep.py ...
@@ -364,6 +410,15 @@ caffeinate -is ./scripts/model_size_sweep.py ...
 
 or lower the ceiling on what an orphan can cost, with `--job-timeout 4h`
 instead of the 24h default.
+
+A self-hosted model can still be submitted, but the generated preset has to
+reach the job. `--submit` clones `--repo` at `--ref` and runs the script from
+that clone, so a preset sitting untracked in your working tree is invisible to
+it and the run dies with "no harness preset at configs/agents/...". Commit the
+preset and push it to the branch you pass as `--ref`, then submit. The
+`base_url` in it names a job id, so the preset is only valid while that server
+job lives, and the server's own `--timeout` must outlast the sweep: when it
+expires mid-run, every remaining unit fails at its first API call.
 
 ### Job labels
 
