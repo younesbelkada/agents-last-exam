@@ -105,6 +105,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="hard cap on each sandbox job, which is what bounds the bill "
                              "if the orchestrator dies without cancelling its sandboxes "
                              "(default: %(default)s)")
+    parser.add_argument("--disable-resume", action="store_true",
+                        help="re-run every selected cell, even one that already has a "
+                             "completed or timeout result. Resume counts a timeout as "
+                             "done, so this is what re-runs a cell that hit --wall-time")
     parser.add_argument("--submit", action="store_true",
                         help="run the orchestrator as an HF Job instead of locally")
     parser.add_argument("--detach", action="store_true",
@@ -264,6 +268,7 @@ def sweep(args: argparse.Namespace) -> int:
         data_bucket=args.data_bucket,
         results_bucket=args.results_bucket,
         namespace=args.namespace,
+        disable_resume=args.disable_resume,
         submit=args.submit,
         detach=args.detach,
         git_repo=args.git_repo,

@@ -225,6 +225,24 @@ Because `auto_resume` is scoped to that output root, re-invoking with the same
 `--run-name` re-runs only the cells that have no completed run; without
 `--run-name` each invocation starts a fresh timestamped root.
 
+Resume counts a `timeout` as done, alongside `completed`, so a cell killed by
+`--wall-time` is skipped on the next invocation. Re-running one takes
+`--disable-resume`, which re-runs every *selected* unit, so narrow the
+selection to what you actually want repeated:
+
+```bash
+scripts/model_size_sweep.py --run-name <same-name> --harness <same-harness> \
+  --model Qwen/Qwen3.8-27B \
+  --tasks computing_math/branch_bound_atsp,physical_sciences/adapt_vqe_molecular_energy \
+  --wall-time 7200 --disable-resume ...
+```
+
+The re-run writes a new timestamped directory next to the old one. Nothing is
+overwritten, and the report reads the most recent result per (model, task), so
+the matrix picks up the new score on its own. Keep `--wall-time` at or below
+the `vm.timeout` in each selected task card, since the experiment-wide value
+overrides it in both directions.
+
 A local run prints a task by model score matrix when it ends (`--no-report`
 suppresses it). After a `--submit` run, pull the logs and render the same table
 from them:
@@ -347,7 +365,31 @@ caffeinate -is ./scripts/model_size_sweep.py ...
 or lower the ceiling on what an orphan can cost, with `--job-timeout 4h`
 instead of the 24h default.
 
-To sweep up strays, both scripts label their jobs:
+### Job labels
+
+Every job ALE creates is labelled, which is what makes a multi-model run
+legible in `hf jobs ps` and lets you cancel one model's jobs without touching
+another's.
+
+| Label | On | Value |
+|---|---|---|
+| `ale` | all | `orchestrator`, `sandbox` or `model-server` |
+| `ale_model` | all | the model id, e.g. `Qwen_Qwen3.5-9B` |
+| `ale_harness` | orchestrator, sandbox | e.g. `pi_cli` |
+| `ale_task` | sandbox | e.g. `legal_legal_dr_fees_01` |
+
+Label values must match `^[a-zA-Z0-9._-]*$`, so `/` becomes `_` and the value
+is truncated at 60 characters. An orchestrator running a model matrix carries
+no `ale_model`, since one job covers several; it is named `ale-<run-name>`
+instead.
+
+```bash
+hf jobs ps --label ale=sandbox                        # everything in flight
+hf jobs ps --label ale_model=Qwen_Qwen3.8-27B         # just the 27B rung
+hf jobs ps --label ale=sandbox --label ale_harness=pi_cli
+```
+
+To sweep up strays:
 
 ```bash
 hf jobs ps --label ale=sandbox -q      | xargs -I{} hf jobs cancel {}

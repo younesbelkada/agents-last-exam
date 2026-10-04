@@ -50,6 +50,7 @@ from ale_hf_common import (
     ensure_hf_token,
     hf_cli,
     info,
+    job_label,
     reject_blank_token_in_secret_env,
     require_bucket_uri,
     require_linux_subset,
@@ -82,6 +83,7 @@ class Settings:
     data_bucket: str = field(default_factory=lambda: os.environ.get("ALE_DATA_BUCKET", ""))
     results_bucket: str = field(default_factory=lambda: os.environ.get("ALE_RESULTS_BUCKET", ""))
     namespace: str = ""
+    disable_resume: bool = False
     submit: bool = False
     detach: bool = False
     git_repo: str = UPSTREAM_REPO
@@ -131,6 +133,10 @@ def parse_args(argv: list[str] | None = None) -> Settings:
                         help="hard cap on each sandbox job. This is what bounds the bill "
                              "if the orchestrator dies without cancelling its sandboxes "
                              "(default: %(default)s)")
+    parser.add_argument("--disable-resume", action="store_true",
+                        help="re-run every selected unit, even one that already has a "
+                             "completed or timeout result. Resume treats a timeout as "
+                             "done, so this is what re-runs a unit that hit --wall-time")
     parser.add_argument("--submit", action="store_true",
                         help="run the orchestrator itself as an HF Job")
     parser.add_argument("--detach", action="store_true",
@@ -166,6 +172,7 @@ def parse_args(argv: list[str] | None = None) -> Settings:
         data_bucket=args.data_bucket,
         results_bucket=args.results_bucket,
         namespace=args.namespace,
+        disable_resume=args.disable_resume,
         submit=args.submit,
         detach=args.detach,
         git_repo=args.git_repo,
@@ -294,7 +301,7 @@ def preflight_data_bucket(settings: Settings, tasks: list[str]) -> None:
         )
 
 
-def submit_orchestrator(settings: Settings, tasks: list[str]) -> int:
+def submit_orchestrator(settings: Settings, tasks: list[str], run_name: str) -> int:
     """Run this same script inside a cpu-basic HF Job against a fresh clone."""
     flags = [
         "--harness", settings.harness,
@@ -307,12 +314,16 @@ def submit_orchestrator(settings: Settings, tasks: list[str]) -> int:
     ]
     for model in settings.models:
         flags += ["--model", model]
+    if settings.disable_resume:
+        flags.append("--disable-resume")
     for flag, value in (
         ("--data-bucket", settings.data_bucket),
         ("--prompt-suffix", settings.prompt_suffix),
         ("--results-bucket", settings.results_bucket),
         ("--namespace", settings.namespace),
-        ("--run-name", settings.run_name),
+        # The resolved name, not settings.run_name: an auto-generated one must
+        # reach the job, or its results land under a different output root.
+        ("--run-name", run_name),
     ):
         if value:
             flags += [flag, value]
@@ -335,7 +346,13 @@ exec uv run python scripts/hf_quickrun.py {shlex.join(flags)}"""
         return 0
 
     argv = ["hf", "jobs", "run", "--flavor", "cpu-basic", "--timeout", ORCHESTRATOR_TIMEOUT,
-            "--secrets", "HF_TOKEN"]
+            "--secrets", "HF_TOKEN",
+            "--name", job_label(f"ale-{run_name}"),
+            "--label", "ale=orchestrator",
+            "--label", f"ale_harness={job_label(settings.harness)}"]
+    # One label per job, so a model only identifies the job when it runs alone.
+    if len(settings.models) == 1:
+        argv += ["--label", f"ale_model={job_label(settings.models[0])}"]
     # Without --detach the CLI blocks streaming the job's logs. The job is created
     # before that starts, so losing the stream never stops the run.
     if settings.detach:
@@ -389,16 +406,17 @@ def quickrun(settings: Settings) -> int:
     info(f"results:     .logs/ale/{run_name}/")
 
     if settings.submit:
-        return submit_orchestrator(settings, tasks)
+        return submit_orchestrator(settings, tasks, run_name)
 
     ale = ["uv", "run", "python", "-m", "ale_run"] if shutil.which("uv") \
         else [sys.executable, "-m", "ale_run"]
+    run_argv = [*ale, "run", str(experiment_config)]
+    if settings.disable_resume:
+        run_argv.append("--disable-resume")
     if settings.dry_run:
-        return subprocess.run(
-            [*ale, "run", str(experiment_config), "--dry-run"], check=False
-        ).returncode
+        return subprocess.run([*run_argv, "--dry-run"], check=False).returncode
 
-    status = subprocess.run([*ale, "run", str(experiment_config), "-v"], check=False).returncode
+    status = subprocess.run([*run_argv, "-v"], check=False).returncode
     if settings.results_bucket:
         info(f"syncing .logs/ale -> {settings.results_bucket}")
         subprocess.run(
