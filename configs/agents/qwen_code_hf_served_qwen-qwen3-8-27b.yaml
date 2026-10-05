@@ -1,0 +1,6 @@
+harness: qwen_code
+model: Qwen/Qwen3.8-27B
+config:
+  base_url: https://6ac332abfbc85ba6823a5310--8000.hf.jobs/v1
+  api_key: ${env:HF_TOKEN}
+id: qwen_code_hf_served_qwen-qwen3-8-27b
