@@ -1,0 +1,35 @@
+# pi_cli system-prompt ablation, arm C: pi's own prompt replaced with a minimal one.
+#
+# Arm A  configs/agents/pi_cli_hf_served_qwen-qwen3-8-27b.yaml  pi's default prompt
+# Arm B  configs/agents/pi_cli_hf_sysprompt_v1.yaml             default + one instruction
+# Arm C  this file                                              minimal prompt instead
+#
+# Where B asks whether an extra instruction helps, C asks what pi's prompt
+# engineering is worth at all. That is the larger and more interpretable
+# effect, which matters when the task count is small enough that a reworded
+# sentence would be lost in the noise.
+#
+# `--system-prompt` replaces pi's prompt but still appends context files and
+# skills, and tool definitions reach the model through the API rather than the
+# prompt, so the agent keeps its tools. What it loses is pi's workflow
+# guidance, tool guardrails and output discipline.
+#
+# base_url points at a specific HF job. If that job is stopped and the model
+# re-served, update the URL here and in the other arms, or they will be talking
+# to different servers.
+#
+# Reference as:  agents: [ configs/agents/pi_cli_hf_sysprompt_v2.yaml ]
+
+harness: pi_cli
+id: pi_sysprompt_v2
+model: Qwen/Qwen3.8-27B
+config:
+  provider: custom
+  base_url: https://6ac332abfbc85ba6823a5310--8000.hf.jobs/v1
+  api_key: ${env:HF_TOKEN}
+  extra_args:
+    - "--system-prompt"
+    - |
+      You are a software engineering agent working on a remote Linux machine.
+      Use the tools available to you to complete the user's task. Keep working
+      until the task is finished.
