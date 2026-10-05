@@ -75,6 +75,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--harness", default="qwen_code_hf",
                         help="preset under configs/agents/ (default: %(default)s)")
+    parser.add_argument("--agent", action="append", default=[], metavar="NAME",
+                        help="preset under configs/agents/ used verbatim; repeat to run "
+                             "several arms (e.g. a prompt ablation) in one experiment. "
+                             "Each needs its own `id:`. Overrides --harness/--model")
     parser.add_argument("--model", action="append", default=[], metavar="ID",
                         help="replace the default ladder; repeat per model")
     parser.add_argument("--tasks", default="10%", metavar="N|N%|FILE|CSV",
@@ -160,40 +164,60 @@ def record_plan(
     return sweep_dir
 
 
-def load_scores(log_root: Path) -> dict[tuple[str, str], tuple[str, float | None]]:
-    """Latest (status, score) per (model, task) from a `.logs/ale` tree.
+def load_scores(log_root: Path) -> dict[tuple[tuple[str, str], str], tuple[str, float | None]]:
+    """Latest (status, score) per ((agent id, model), task) from a `.logs/ale` tree.
 
-    Keyed on `agent.model` and `task.path` as written into run.json, so it does
-    not depend on reproducing the directory slugs.
+    Keyed on what run.json records rather than on the directory slugs. The agent
+    id is part of the key because an ablation holds the model fixed and varies
+    the agent config, so keying on the model alone would merge the arms.
     """
-    latest: dict[tuple[str, str], tuple[str, str, float | None]] = {}
+    latest: dict[tuple[tuple[str, str], str], tuple[str, str, float | None]] = {}
     for run_json in log_root.rglob("run.json"):
         try:
             payload = json.loads(run_json.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        model = (payload.get("agent") or {}).get("model") or "?"
+        agent = payload.get("agent") or {}
+        arm = (agent.get("id") or "?", agent.get("model") or "?")
         task = ((payload.get("task") or {}).get("path") or "?").removeprefix("tasks/")
         stamp = payload.get("timestamp_utc") or run_json.parent.name
-        key = (model, task)
+        key = (arm, task)
         if key not in latest or stamp >= latest[key][0]:
             latest[key] = (stamp, payload.get("status") or "?", payload.get("score"))
     return {key: (status, score) for key, (_, status, score) in latest.items()}
 
 
+def column_labels(arms: list[tuple[str, str]]) -> list[str]:
+    """Shortest labels that still tell the arms apart.
+
+    One agent across several models is a model sweep, so label by model; one
+    model across several agents is an ablation, so label by agent id.
+    """
+    by_model = [m.split("/")[-1] for _, m in arms]
+    by_agent = [a for a, _ in arms]
+    if len({a for a, _ in arms}) == 1:
+        return by_model
+    if len({m for _, m in arms}) == 1:
+        return by_agent
+    return [f"{a}/{m}" for a, m in zip(by_agent, by_model, strict=True)]
+
+
 def print_report(log_root: Path, models: list[str], tasks: list[str]) -> None:
-    """Print a task x model score matrix, models left to right in ladder order."""
+    """Print a task x arm score matrix, model sweeps left to right in ladder order."""
     scores = load_scores(log_root)
     if not scores:
         info(f"no run.json found under {log_root}; nothing to report")
         return
 
-    def ladder_rank(model: str) -> tuple[int, str]:
-        return (MODEL_LADDER.index(model) if model in MODEL_LADDER else len(MODEL_LADDER), model)
+    def ladder_rank(arm: tuple[str, str]) -> tuple[int, str, str]:
+        agent, model = arm
+        rank = MODEL_LADDER.index(model) if model in MODEL_LADDER else len(MODEL_LADDER)
+        return (rank, model, agent)
 
-    row_models = models or sorted({m for m, _ in scores}, key=ladder_rank)
+    found = sorted({arm for arm, _ in scores}, key=ladder_rank)
+    row_arms = [arm for arm in found if not models or arm[1] in models]
     row_tasks = tasks or sorted({t for _, t in scores})
-    columns = [m.split("/")[-1] for m in row_models]
+    columns = column_labels(row_arms)
     task_width = max((len(t) for t in [*row_tasks, "scored / total"]), default=4) + 2
     widths = [len(c) + 2 for c in columns]
 
@@ -203,16 +227,16 @@ def print_report(log_root: Path, models: list[str], tasks: list[str]) -> None:
             + "".join(cell.rjust(w) for cell, w in zip(cells, widths, strict=True))
         ).rstrip()
 
-    scored: dict[str, list[float]] = defaultdict(list)
+    scored: dict[tuple[str, str], list[float]] = defaultdict(list)
     rows = []
     for task in row_tasks:
         cells = []
-        for model in row_models:
-            status, score = scores.get((model, task), ("", None))
+        for arm in row_arms:
+            status, score = scores.get((arm, task), ("", None))
             if score is None:
                 cells.append({"": "-", "failed": "F", "timeout": "T"}.get(status, status[:8]))
             else:
-                scored[model].append(float(score))
+                scored[arm].append(float(score))
                 cells.append(f"{float(score):.2f}")
         rows.append(render(task, cells))
 
@@ -223,15 +247,15 @@ def print_report(log_root: Path, models: list[str], tasks: list[str]) -> None:
     print("\n".join(rows))
     print("-" * (task_width + sum(widths)))
     print(render("mean (scored)", [
-        f"{sum(scored[m]) / len(scored[m]):.2f}" if scored[m] else "-" for m in row_models
+        f"{sum(scored[a]) / len(scored[a]):.2f}" if scored[a] else "-" for a in row_arms
     ]))
     print(render("scored / total", [
-        f"{len(scored[m])}/{len(row_tasks)}" for m in row_models
+        f"{len(scored[a])}/{len(row_tasks)}" for a in row_arms
     ]))
 
 
 def sweep(args: argparse.Namespace) -> int:
-    models = list(args.model) or list(MODEL_LADDER)
+    models = [] if args.agent else (list(args.model) or list(MODEL_LADDER))
     tasks = select_tasks(args.tasks, pool=args.pool)
     require_linux_subset(tasks)
 
@@ -256,6 +280,7 @@ def sweep(args: argparse.Namespace) -> int:
 
     settings = hf_quickrun.Settings(
         harness=args.harness,
+        agents=tuple(args.agent),
         models=tuple(models),
         tasks=",".join(tasks),
         pool=args.pool,

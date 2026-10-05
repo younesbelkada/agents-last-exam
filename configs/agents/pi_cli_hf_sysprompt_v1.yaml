@@ -1,0 +1,38 @@
+# pi_cli system-prompt ablation, arm B.
+#
+# Arm A is configs/agents/pi_cli_hf_served_qwen-qwen3-8-27b.yaml, which
+# scripts/serve_model_job.py generated for the running vLLM job. This file is a
+# copy of it with two fields changed, `id:` and `extra_args:`, so the prompt is
+# the only thing that differs between the arms.
+#
+# `id:` is what keeps the arms apart. The output tree is
+# <agent_id>/<model_slug>/<task>/ and resume keys on the same tuple, so two arms
+# sharing an id would overwrite each other's cells and be averaged together in
+# the report.
+#
+# base_url points at a specific HF job. If that job is stopped and the model
+# re-served, serve_model_job.py regenerates arm A with the new job id but
+# cannot know about this file: update the URL here to match, or the two arms
+# will be talking to different servers.
+#
+# pi's prompt flags (v0.85.1, confirmed against the pinned npm package):
+#   --system-prompt <text>         replace the default prompt; context files
+#                                  and skills are still appended afterwards
+#   --append-system-prompt <text>  append to the default prompt
+#   -nc, --no-context-files        ignore AGENTS.md / CLAUDE.md discovery
+#
+# Reference as:  agents: [ configs/agents/pi_cli_hf_sysprompt_v1.yaml ]
+
+harness: pi_cli
+id: pi_sysprompt_v1
+model: Qwen/Qwen3.8-27B
+config:
+  provider: custom
+  base_url: https://6ac332abfbc85ba6823a5310--8000.hf.jobs/v1
+  api_key: ${env:HF_TOKEN}
+  extra_args:
+    - "--append-system-prompt"
+    - |
+      Before editing or creating any file, state in one sentence what you
+      expect the result to be. After each command, check its output against
+      that expectation before continuing.

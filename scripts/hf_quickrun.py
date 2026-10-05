@@ -71,6 +71,7 @@ class Settings:
     """One quickrun invocation. `parse_args` builds it from the command line."""
 
     harness: str = "openhands_cli_hf"
+    agents: tuple[str, ...] = ()
     models: tuple[str, ...] = ()
     tasks: str = "6"
     pool: str = DEFAULT_POOL
@@ -99,6 +100,10 @@ def parse_args(argv: list[str] | None = None) -> Settings:
     )
     parser.add_argument("--harness", default=Settings.harness,
                         help="preset under configs/agents/ (default: %(default)s)")
+    parser.add_argument("--agent", action="append", default=[], metavar="NAME",
+                        help="preset under configs/agents/ used verbatim; repeat to run "
+                             "several arms in one experiment. Each needs its own `id:`. "
+                             "Overrides --harness/--model")
     parser.add_argument("--model", action="append", default=[], metavar="ID",
                         help="model id overriding the preset's `model:`; repeat (or pass a "
                              "comma-separated list) to run a model matrix")
@@ -160,6 +165,7 @@ def parse_args(argv: list[str] | None = None) -> Settings:
             setattr(args, attr, str(given.resolve()))
     return Settings(
         harness=args.harness,
+        agents=tuple(a.strip() for spec in args.agent for a in spec.split(",") if a.strip()),
         models=models,
         tasks=args.tasks,
         pool=args.pool,
@@ -188,7 +194,27 @@ def model_slug(model: str) -> str:
 
 
 def write_agent_configs(settings: Settings, run_dir: Path) -> list[Path]:
-    """One agent yaml per model (or a copy of the preset when no model is given)."""
+    """One agent yaml per model, or one per `--agent` preset when those are given.
+
+    `--agent` presets are copied verbatim, which is what an ablation needs: the
+    arms differ by whatever their yaml says, and each must carry its own `id:`
+    so the output tree keeps them apart.
+    """
+    if settings.agents:
+        written = []
+        for name in settings.agents:
+            source = REPO_ROOT / "configs" / "agents" / f"{name}.yaml"
+            if not source.is_file():
+                raise ScriptError(f"no agent preset at {source.relative_to(REPO_ROOT)}")
+            raw = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+            if not raw.get("id"):
+                warn(f"{name}.yaml has no `id:`, so it shares an output branch with "
+                     f"every other preset of harness {raw.get('harness') or '?'}")
+            target = run_dir / f"agent-{model_slug(name)}.yaml"
+            target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+            written.append(target)
+        return written
+
     preset = REPO_ROOT / "configs" / "agents" / f"{settings.harness}.yaml"
     if not preset.is_file():
         raise ScriptError(f"no harness preset at {preset.relative_to(REPO_ROOT)}")
@@ -314,6 +340,8 @@ def submit_orchestrator(settings: Settings, tasks: list[str], run_name: str) -> 
     ]
     for model in settings.models:
         flags += ["--model", model]
+    for agent in settings.agents:
+        flags += ["--agent", agent]
     if settings.disable_resume:
         flags.append("--disable-resume")
     for flag, value in (
@@ -391,13 +419,17 @@ def quickrun(settings: Settings) -> int:
     )
     preflight_data_bucket(settings, tasks)
 
-    models = settings.models or ("<preset default>",)
-    info(f"harness:     {settings.harness}")
-    info(f"models:      {len(models)} - {', '.join(models)}")
+    if settings.agents:
+        arms: tuple[str, ...] = settings.agents
+        info(f"agents:      {len(arms)} - {', '.join(arms)}")
+    else:
+        arms = settings.models or ("<preset default>",)
+        info(f"harness:     {settings.harness}")
+        info(f"models:      {len(arms)} - {', '.join(arms)}")
     info(f"tasks:       {len(tasks)} selected")
     for task in tasks:
         print(f"                 {task}", flush=True)
-    info(f"units:       {len(models) * len(tasks)} (models x tasks)")
+    info(f"units:       {len(arms) * len(tasks)} (arms x tasks)")
     info(f"sandboxes:   {settings.flavor}, {settings.concurrency} in flight, "
          f"{settings.wall_time}s per task")
     info(f"boot budget: {settings.start_timeout}s per sandbox (cold image pull runs ~30 min)")
