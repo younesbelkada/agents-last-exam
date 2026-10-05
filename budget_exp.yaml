@@ -1,0 +1,37 @@
+# Budget-split experiment: is one agent with B better than N agents with B/N?
+#
+# Both arms run over the same tasks with the same B; the agent matrix runs each
+# arm independently over every task (see ale_run/orchestration/runner.py), which
+# is what we want here - they are conditions, not collaborators.
+#
+#     uv run python -m ale_run run budget_exp.yaml --dry-run
+#     uv run python -m ale_run run budget_exp.yaml -v
+#
+# Read docs/budget-split-experiment.md before interpreting any result: the
+# stop_reason breakdown decides which runs are evidence about budgets at all.
+
+name: budget_split
+
+secret_file: secret/.env
+
+agents:
+  - configs/agents/claw_budget_single.yaml
+  - configs/agents/claw_budget_split.yaml
+environment: configs/environments/hfsandbox.yaml
+
+tasks: selected_tasks/docker_support.txt
+
+output:
+  root: .logs/ale
+
+# One unit at a time: the agents run host-side, so N sub-agents already fan out
+# inside a single unit. Raising this multiplies concurrent model clients.
+concurrency: 1
+
+# Generous on purpose. The budget is meant to be the binding constraint; a run
+# that ends on the wall clock is not evidence about token allocation.
+wall_time_s: 7200
+
+auto_resume: true
+max_attempts: 1
+cleanup_mode: delete

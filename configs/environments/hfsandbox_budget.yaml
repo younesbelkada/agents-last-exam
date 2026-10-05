@@ -1,0 +1,21 @@
+# HF Sandboxes environment for the budget-split experiment.
+#
+# Same as configs/environments/hfsandbox.yaml with two changes:
+#   - the task-data bucket is filled in rather than a placeholder;
+#   - start_timeout is 3600, not 1800. A cold pull of the ~40 GB image was
+#     measured at ~28 minutes, which leaves no margin at the shipped default
+#     and fails the unit with "job ... not RUNNING after 1800s".
+
+provider: hfsandbox
+
+image: ale-ubuntu22-docker
+flavor: cpu-upgrade
+transport: job
+job_timeout: 24h
+start_timeout: 3600
+resolution: [1024, 768]
+
+volumes:
+  - hf://buckets/ybelkada/ale-task-data:/mnt/ale-task-data:ro
+task_data_source: mounted:/mnt/ale-task-data
+output_path: local

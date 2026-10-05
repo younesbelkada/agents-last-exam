@@ -1,0 +1,6 @@
+# Small subset for the budget-split experiment: one task per domain, all
+# cpu-free-ubuntu, all gradeable with the gated reference data.
+# Both arms run over every line here, so N tasks means 2N sandbox jobs.
+business_finance/american_option_pricing_ls
+computing_math/branch_bound_atsp
+health_medicine/Clinical_Variant_Annotation

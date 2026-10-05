@@ -1,0 +1,22 @@
+# Local debug environment for the budget-split experiment.
+#
+# Same sandbox image as hfsandbox, started as a local container instead of an
+# HF job: no per-iteration cold pull, no job cost. The first run pulls ~40 GB
+# once. Use this to debug the harness, then switch to hfsandbox for real runs.
+#
+# Differs from configs/environments/docker.yaml in two ways:
+#   - task data comes from the subset already fetched by fetch_task_subset.sh,
+#     so nothing is downloaded again;
+#   - no gcs_sa_key: `local:` staging never reads it, and secret/gcp_key.json
+#     does not exist here.
+
+snapshots:
+  cpu-free-ubuntu:
+    provider: docker
+    image: ale-ubuntu22-docker
+    docker:
+      shm_size: 2g
+      resolution: [1024, 768]
+
+task_data_source: local:task-data-subset/tasks
+output_path: null

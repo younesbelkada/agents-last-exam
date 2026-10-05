@@ -1,0 +1,41 @@
+# Qwen3.8-27B, the same budget split across N sub-agents.
+#
+# Pairs with configs/agents/claw_budget_qwen_single.yaml. The two must differ in
+# exactly n_subagents and disabled_tools; every other value has to match or the
+# run measures more than the budget split.
+
+harness: claw_budget
+id: claw_budget_qwen_split
+executor: local
+
+# The openrouter/ prefix is mandatory, for two independent reasons:
+#   1. the harness's vendored loop is registered for `openrouter/.*` only
+#      (harness/model/unified_loop.py:529); any other prefix falls through to
+#      the SDK's per-provider loops;
+#   2. a model string containing "openai" infers the OpenAI *Responses* API
+#      (model_config.py::_infer_model_api), which vLLM does not serve.
+# litellm strips the prefix before sending, so vLLM receives the name it was
+# launched with.
+model: openrouter/Qwen/Qwen3.8-27B
+
+config:
+  # The vLLM serving job's exposed port. Must be running for the whole
+  # experiment; the job id changes every time you restart it.
+  base_url: https://6ac332abfbc85ba6823a5310--8000.hf.jobs/v1
+  api_key: ${env:HF_TOKEN}
+
+  # NOTE: this model serves a 131072-token context, but the harness has no
+  # config knob for it and defaults to 200000 when litellm does not know the
+  # model (deployer.py:226-232). Export the override or the agent will not
+  # compact until calls start failing:
+  #     export CONTEXT_WINDOW_OVERRIDE=131072
+
+  budget_total_tokens: 300000
+  n_subagents: 4
+  min_turn_tokens: 2000
+  subagent_max_output_tokens: 4096
+
+  disabled_tools: ["web_search"]
+  disable_delegate_gui: true
+
+  max_turns: 100

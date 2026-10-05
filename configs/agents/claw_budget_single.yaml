@@ -1,0 +1,32 @@
+# Arm A of the budget-split experiment: ONE agent holding the whole budget.
+#
+# Pairs with configs/agents/claw_budget_split.yaml, which must differ from this
+# file in exactly two keys (n_subagents, disabled_tools). Everything else has to
+# match or the comparison measures more than one thing.
+#
+# The budget covers input + output tokens for the agent and every helper call
+# (compaction, memory flush, vision). Reference as:
+#   agents: [ configs/agents/claw_budget_single.yaml ]
+
+harness: claw_budget
+# Both arms share a harness, so the id must be set explicitly: it names the
+# output dir, and without it the two arms would write to the same path and
+# auto_resume would treat one arm's finished unit as the other's.
+id: claw_budget_single
+executor: local
+
+model: openrouter/anthropic/claude-sonnet-4.6
+
+config:
+  budget_total_tokens: 200000
+  n_subagents: 0
+  min_turn_tokens: 2000
+
+  # Delegation off: this arm is one agent by definition. `subagents` goes too,
+  # since listing/steering is meaningless without them.
+  disabled_tools: ["web_search", "delegate_general", "subagents"]
+  # delegate_gui is a second delegation axis that n_subagents does not bound,
+  # so it stays off in BOTH arms.
+  disable_delegate_gui: true
+
+  max_turns: 100

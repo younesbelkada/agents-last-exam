@@ -1,0 +1,32 @@
+# Arm B of the budget-split experiment: the same budget split across N
+# sub-agents, each capped at min(B/N, remaining).
+#
+# Differs from configs/agents/claw_budget_single.yaml in exactly two keys:
+# n_subagents and disabled_tools. Keep every other value identical when you
+# change one.
+#
+# The orchestrator's own turns come out of the same envelope, so this arm pays
+# for its coordination overhead rather than getting it free.
+
+harness: claw_budget
+# Both arms share a harness, so the id must be set explicitly: it names the
+# output dir, and without it the two arms would write to the same path and
+# auto_resume would treat one arm's finished unit as the other's.
+id: claw_budget_split
+executor: local
+
+model: openrouter/anthropic/claude-sonnet-4.6
+
+config:
+  budget_total_tokens: 200000
+  n_subagents: 4
+  min_turn_tokens: 2000
+
+  # Hard per-call output cap for sub-agents. The stock sub-agent session sets
+  # none, which would leave per-call overshoot unbounded.
+  subagent_max_output_tokens: 4096
+
+  disabled_tools: ["web_search"]
+  disable_delegate_gui: true
+
+  max_turns: 100
